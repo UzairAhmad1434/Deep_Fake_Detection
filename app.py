@@ -192,15 +192,29 @@ def load_logo():
         """
         return svg_code, True
 
-# Load model with better error handling
+# Load model with better error handling and deployment checks
 @st.cache_resource
 def load_ai_model():
     try:
+        # First verify model file exists
+        if not os.path.exists('my_custom_model.h5'):
+            st.error("CRITICAL: Model file 'my_custom_model.h5' not found in deployment!")
+            st.error(f"Current directory contents: {os.listdir('.')}")
+            return None
+            
+        # Check file size (deployment platforms often have limits)
+        file_size = os.path.getsize('my_custom_model.h5') / (1024 * 1024)  # in MB
+        if file_size > 500:  # Common free tier limit
+            st.warning(f"Model file is large ({file_size:.2f} MB). Some platforms may not load it properly.")
+        
         model = load_model('my_custom_model.h5')
         st.session_state.model_loaded = True
+        st.success("Model loaded successfully!")
         return model
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
+        if "OOM" in str(e):  # Out of memory error
+            st.error("Your deployment environment may have insufficient memory. Try using a smaller model.")
         st.session_state.model_loaded = False
         return None
 
@@ -296,8 +310,10 @@ def page_1():
         img = img.resize((300, 300))
         st.image(img, caption="Uploaded Image", use_container_width=False)
         
-        if st.button("Analyze Image", type="primary", use_container_width=True):
-            model = load_ai_model()
+        if st.button("Analyze Image", type="primary", use_container_width=True, key="analyze_btn"):
+            with st.spinner("Loading AI model..."):
+                model = load_ai_model()
+                
             if model and st.session_state.model_loaded:
                 with st.spinner("Analyzing image patterns..."):
                     try:
@@ -319,6 +335,7 @@ def page_1():
                                 'is_real': is_real
                             }
                             st.session_state.page = 2
+                            st.rerun()  # Force refresh to show results page
                     except Exception as e:
                         st.error(f"Analysis failed: {str(e)}")
                         st.session_state.model_loaded = False
@@ -415,11 +432,13 @@ def page_2():
     with btn_cols[0]:
         if st.button("Back to Upload", use_container_width=True):
             st.session_state.page = 1
+            st.rerun()
     with btn_cols[1]:
         if st.button("Start Over", use_container_width=True):
             st.session_state.page = 1
             st.session_state.uploaded_file = None
             st.session_state.prediction_result = None
+            st.rerun()
 
 # Main app logic for page navigation
 def main():
