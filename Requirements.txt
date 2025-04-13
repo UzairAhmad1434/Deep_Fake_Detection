@@ -1,0 +1,9 @@
+
+# Requirements for Deepfake Detection Streamlit App
+streamlit>=1.26.0
+numpy>=1.23.0
+Pillow>=10.0.0
+tensorflow>=2.13.0
+scikit-learn>=1.3.0
+matplotlib>=3.7.2
+pandas>=2.0.3
