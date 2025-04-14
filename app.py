@@ -4,6 +4,11 @@ from PIL import Image
 from tensorflow.keras.models import load_model
 import time
 import os
+import logging
+
+# Set up logging to debug deployment issues
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Set page config with wider layout and better theme
 st.set_page_config(
@@ -18,7 +23,7 @@ st.set_page_config(
     }
 )
 
-# Custom CSS for enhanced styling with scrollbar removed and container height adjusted
+# Keep your existing CSS (unchanged)
 st.markdown("""
 <style>
     body, .main {
@@ -169,6 +174,10 @@ if 'prediction_result' not in st.session_state:
     st.session_state.prediction_result = None
 if 'model_loaded' not in st.session_state:
     st.session_state.model_loaded = False
+if 'error_msg' not in st.session_state:
+    st.session_state.error_msg = None
+if 'model' not in st.session_state:
+    st.session_state.model = None
 if 'logo' not in st.session_state:
     st.session_state.logo = None
     st.session_state.is_svg = False
@@ -176,58 +185,131 @@ if 'logo' not in st.session_state:
 # Function to load the logo image
 @st.cache_resource
 def load_logo():
-    logo_path = "images.png"
-    try:
-        img = Image.open(logo_path)
-        return img.resize((100, 100))
-    except Exception as e:
-        st.error(f"Error loading logo image: {str(e)}")
-        svg_code = """
-        <svg width="100" height="100" xmlns="http://www.w3.org/2000/svg">
-            <rect width="100%" height="100%" fill="#1e3a8a" rx="10" ry="10"/>
-            <circle cx="50" cy="50" r="30" fill="#60a5fa"/>
-            <path d="M30 50 L45 65 L70 35" stroke="white" stroke-width="6" fill="none"/>
-            <text x="50" y="85" font-family="Arial" font-size="12" fill="white" text-anchor="middle">DETECTOR</text>
-        </svg>
-        """
-        return svg_code, True
+    # Try multiple possible paths for logo
+    possible_paths = ["images.png", "./images.png", "../images.png", "/app/images.png"]
+    
+    for path in possible_paths:
+        try:
+            if os.path.exists(path):
+                logger.info(f"Found logo at {path}")
+                img = Image.open(path)
+                return img.resize((100, 100))
+        except Exception as e:
+            logger.warning(f"Failed to load logo from {path}: {str(e)}")
+            continue
+    
+    # Fallback to SVG
+    logger.info("Using SVG fallback for logo")
+    svg_code = """
+    <svg width="100" height="100" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100%" height="100%" fill="#1e3a8a" rx="10" ry="10"/>
+        <circle cx="50" cy="50" r="30" fill="#60a5fa"/>
+        <path d="M30 50 L45 65 L70 35" stroke="white" stroke-width="6" fill="none"/>
+        <text x="50" y="85" font-family="Arial" font-size="12" fill="white" text-anchor="middle">DETECTOR</text>
+    </svg>
+    """
+    return svg_code, True
 
-# Load model with better error handling and deployment checks
+# Load model with improved error handling for deployment environments
 @st.cache_resource
 def load_ai_model():
-    try:
-        # First verify model file exists
-        if not os.path.exists('my_custom_model.h5'):
-            st.error("CRITICAL: Model file 'my_custom_model.h5' not found in deployment!")
-            st.error(f"Current directory contents: {os.listdir('.')}")
-            return None
+    # Check if model is already loaded in session state
+    if st.session_state.model is not None and st.session_state.model_loaded:
+        logger.info("Using already loaded model from session state")
+        return st.session_state.model
+    
+    # Try multiple possible paths for model
+    possible_paths = ["my_custom_model.h5", "./my_custom_model.h5", "../my_custom_model.h5", "/app/my_custom_model.h5"]
+    
+    for model_path in possible_paths:
+        try:
+            logger.info(f"Attempting to load model from: {model_path}")
             
-        # Check file size (deployment platforms often have limits)
-        file_size = os.path.getsize('my_custom_model.h5') / (1024 * 1024)  # in MB
-        if file_size > 500:  # Common free tier limit
-            st.warning(f"Model file is large ({file_size:.2f} MB). Some platforms may not load it properly.")
-        
-        model = load_model('my_custom_model.h5')
-        st.session_state.model_loaded = True
-        st.success("Model loaded successfully!")
-        return model
-    except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
-        if "OOM" in str(e):  # Out of memory error
-            st.error("Your deployment environment may have insufficient memory. Try using a smaller model.")
-        st.session_state.model_loaded = False
-        return None
+            if not os.path.exists(model_path):
+                logger.warning(f"Model path does not exist: {model_path}")
+                continue
+                
+            # Check file size
+            file_size = os.path.getsize(model_path) / (1024 * 1024)  # in MB
+            logger.info(f"Model file size: {file_size:.2f} MB")
+            
+            # Load with reduced memory usage (may help with deployment constraints)
+            import tensorflow as tf
+            tf_version = tf.__version__
+            logger.info(f"TensorFlow version: {tf_version}")
+            
+            # Try to limit memory growth to avoid OOM errors
+            try:
+                physical_devices = tf.config.list_physical_devices('GPU')
+                if len(physical_devices) > 0:
+                    tf.config.experimental.set_memory_growth(physical_devices[0], True)
+                    logger.info("Set GPU memory growth")
+            except:
+                logger.warning("Failed to set GPU memory growth")
+            
+            # Load the model
+            model = load_model(model_path)
+            
+            # Test with a dummy tensor to ensure model works
+            try:
+                dummy_data = np.zeros((1, 224, 224, 3))
+                _ = model.predict(dummy_data, verbose=0)
+                logger.info("Model successfully tested with dummy data")
+            except Exception as e:
+                logger.error(f"Model loaded but failed with dummy input: {str(e)}")
+                continue
+            
+            # Success - save model to session state
+            st.session_state.model = model
+            st.session_state.model_loaded = True
+            st.session_state.error_msg = None
+            logger.info(f"Model successfully loaded from {model_path}")
+            return model
+            
+        except Exception as e:
+            logger.error(f"Error loading model from {model_path}: {str(e)}")
+            st.session_state.error_msg = str(e)
+            continue
+    
+    # If we get here, we couldn't load the model from any path
+    st.session_state.model_loaded = False
+    st.error("Failed to load model from any location. Please check deployment configuration.")
+    logger.error("Failed to load model from any location")
+    return None
 
-# Image preprocessing with validation
+# Image preprocessing with validation and better error handling
 def preprocess_image(uploaded_file, target_size=(224, 224)):
     try:
-        img = Image.open(uploaded_file).convert('RGB')
+        logger.info(f"Processing uploaded file: {uploaded_file.name}, size: {uploaded_file.size} bytes")
+        
+        # Read image into memory
+        image_bytes = uploaded_file.getvalue()
+        logger.info(f"Successfully read {len(image_bytes)} bytes from uploaded file")
+        
+        # Open image with PIL
+        from io import BytesIO
+        img = Image.open(BytesIO(image_bytes)).convert('RGB')
+        logger.info(f"Original image size: {img.size}")
+        
+        # Validate image
         if img.size[0] < 50 or img.size[1] < 50:
             st.warning("Image resolution is very low. Results may be less accurate.")
+        
+        # Resize and normalize
         img = img.resize(target_size)
         img_array = np.array(img) / 255.0
-        return np.expand_dims(img_array, axis=0)
+        
+        # Verify array shape
+        logger.info(f"Preprocessed image array shape: {img_array.shape}")
+        
+        # Expand dimensions for batch
+        expanded_array = np.expand_dims(img_array, axis=0)
+        logger.info(f"Final input shape: {expanded_array.shape}")
+        
+        return expanded_array
+        
     except Exception as e:
+        logger.error(f"Error processing image: {str(e)}")
         st.error(f"Error processing image: {str(e)}")
         return None
 
@@ -275,6 +357,30 @@ def sidebar_content():
         </ul>
         """, unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Add deployment status indicators
+        st.markdown('<div class="sidebar-card">', unsafe_allow_html=True)
+        st.markdown("### System Status")
+        
+        if st.session_state.model_loaded:
+            st.success("✅ Model loaded successfully")
+        else:
+            st.error("❌ Model not loaded")
+            if st.session_state.error_msg:
+                with st.expander("Error details"):
+                    st.code(st.session_state.error_msg)
+        
+        # Add system info
+        import platform
+        st.markdown(f"**Platform:** {platform.system()}")
+        st.markdown(f"**Python:** {platform.python_version()}")
+        try:
+            import tensorflow as tf
+            st.markdown(f"**TensorFlow:** {tf.__version__}")
+        except:
+            st.markdown("**TensorFlow:** Not found")
+            
+        st.markdown('</div>', unsafe_allow_html=True)
 
 # Page 1: Image Upload
 def page_1():
@@ -306,42 +412,116 @@ def page_1():
     
     if uploaded_file is not None:
         st.session_state.uploaded_file = uploaded_file
-        img = Image.open(uploaded_file)
-        img = img.resize((300, 300))
-        st.image(img, caption="Uploaded Image", use_container_width=False)
-        
-        if st.button("Analyze Image", type="primary", use_container_width=True, key="analyze_btn"):
-            with st.spinner("Loading AI model..."):
-                model = load_ai_model()
+        try:
+            img = Image.open(uploaded_file)
+            img = img.resize((300, 300))
+            st.image(img, caption="Uploaded Image", use_container_width=False)
+            
+            if st.button("Analyze Image", type="primary", use_container_width=True, key="analyze_btn"):
+                logger.info("Analyze button clicked")
                 
-            if model and st.session_state.model_loaded:
-                with st.spinner("Analyzing image patterns..."):
-                    try:
-                        img_array = preprocess_image(uploaded_file)
-                        if img_array is not None:
-                            start_time = time.time()
-                            prediction = model.predict(img_array)
-                            inference_time = time.time() - start_time
+                # Pre-load model to avoid waiting later
+                with st.spinner("Loading AI model..."):
+                    model = load_ai_model()
+                    
+                if model and st.session_state.model_loaded:
+                    with st.spinner("Analyzing image patterns..."):
+                        try:
+                            # Reset file position to beginning before reading
+                            uploaded_file.seek(0)
                             
-                            is_real = prediction[0][0] > 0.5
-                            label = "Real Photo" if is_real else "AI-Generated"
-                            confidence = min(100, (prediction[0][0] if is_real else 1 - prediction[0][0]) * 100)
-                            confidence_color = "#10b981" if is_real else "#ef4444"
-                            st.session_state.prediction_result = {
-                                'label': label,
-                                'confidence': confidence,
-                                'confidence_color': confidence_color,
-                                'inference_time': inference_time,
-                                'is_real': is_real
-                            }
-                            st.session_state.page = 2
-                            st.rerun()  # Force refresh to show results page
-                    except Exception as e:
-                        st.error(f"Analysis failed: {str(e)}")
-                        st.session_state.model_loaded = False
+                            # Process image
+                            img_array = preprocess_image(uploaded_file)
+                            logger.info(f"Image preprocessing successful: {img_array is not None}")
+                            
+                            if img_array is not None:
+                                # Add some debug info
+                                st.info(f"Image shape: {img_array.shape}, Min: {img_array.min()}, Max: {img_array.max()}")
+                                
+                                # Make prediction with proper error handling
+                                try:
+                                    start_time = time.time()
+                                    logger.info("Starting model prediction")
+                                    
+                                    # Use a timeout to prevent hanging
+                                    import threading
+                                    import queue
+                                    
+                                    def predict_with_timeout(model, img_array, result_queue):
+                                        try:
+                                            pred = model.predict(img_array, verbose=1)
+                                            result_queue.put(pred)
+                                        except Exception as e:
+                                            result_queue.put(e)
+                                    
+                                    # Create a queue for the result
+                                    q = queue.Queue()
+                                    
+                                    # Create and start the prediction thread
+                                    thread = threading.Thread(target=predict_with_timeout, args=(model, img_array, q))
+                                    thread.start()
+                                    
+                                    # Wait for the thread to finish with timeout
+                                    thread.join(timeout=30)  # 30 seconds timeout
+                                    
+                                    if thread.is_alive():
+                                        # If thread is still running after timeout
+                                        logger.error("Prediction timed out after 30 seconds")
+                                        st.error("Analysis timed out. The model may be overloaded.")
+                                        # Don't proceed
+                                        return
+                                    
+                                    # Get the result from the queue
+                                    result = q.get()
+                                    if isinstance(result, Exception):
+                                        # If an exception was put in the queue
+                                        raise result
+                                    
+                                    prediction = result
+                                    logger.info(f"Prediction completed: {prediction}")
+                                    
+                                    inference_time = time.time() - start_time
+                                    
+                                    is_real = prediction[0][0] > 0.5
+                                    label = "Real Photo" if is_real else "AI-Generated"
+                                    confidence = min(100, (prediction[0][0] if is_real else 1 - prediction[0][0]) * 100)
+                                    confidence_color = "#10b981" if is_real else "#ef4444"
+                                    
+                                    st.session_state.prediction_result = {
+                                        'label': label,
+                                        'confidence': confidence,
+                                        'confidence_color': confidence_color,
+                                        'inference_time': inference_time,
+                                        'is_real': is_real
+                                    }
+                                    
+                                    logger.info(f"Analysis complete: {label} with {confidence:.1f}% confidence")
+                                    st.session_state.page = 2
+                                    st.rerun()  # Force refresh to show results page
+                                    
+                                except Exception as e:
+                                    logger.error(f"Model prediction failed: {str(e)}")
+                                    st.error(f"Model prediction failed: {str(e)}")
+                                    # Add more specific error handling
+                                    if "shape" in str(e).lower():
+                                        st.error("Input shape mismatch. Please try another image.")
+                                    elif "memory" in str(e).lower():
+                                        st.error("Out of memory error. The deployment environment may have insufficient resources.")
+                                    elif "timeout" in str(e).lower():
+                                        st.error("Operation timed out. The server may be overloaded.")
+                        except Exception as e:
+                            logger.error(f"Analysis failed: {str(e)}")
+                            st.error(f"Analysis failed: {str(e)}")
+                else:
+                    st.error("Model could not be loaded. Please check system status in the sidebar.")
+                    # Show a more helpful diagnostic message
+                    st.error("Deployment environment may not have the required resources or permissions to load the model.")
+        except Exception as e:
+            logger.error(f"Error displaying uploaded image: {str(e)}")
+            st.error(f"Error displaying uploaded image: {str(e)}")
     st.markdown('</div>', unsafe_allow_html=True)
 
-# Page 2: Results Display
+# Page 2: Results Display (same as original but with better error handling)
 def page_2():
     st.markdown('<div class="header" style="display: flex; align-items: center; gap: 30px; padding: 1.5rem 0;">', unsafe_allow_html=True)
     col1, col2 = st.columns([0.6, 3])
@@ -362,9 +542,15 @@ def page_2():
     col_img, col_space = st.columns([1, 2])
     with col_img:
         if st.session_state.uploaded_file is not None:
-            img = Image.open(st.session_state.uploaded_file)
-            img = img.resize((250, 250))
-            st.image(img, caption="Uploaded Image", use_container_width=False)
+            try:
+                # Reset file position to beginning before reading
+                st.session_state.uploaded_file.seek(0)
+                img = Image.open(st.session_state.uploaded_file)
+                img = img.resize((250, 250))
+                st.image(img, caption="Uploaded Image", use_container_width=False)
+            except Exception as e:
+                logger.error(f"Error displaying result image: {str(e)}")
+                st.error("Unable to display image. The file may be corrupted or no longer available.")
     
     if st.session_state.prediction_result:
         result = st.session_state.prediction_result
@@ -440,13 +626,19 @@ def page_2():
             st.session_state.prediction_result = None
             st.rerun()
 
-# Main app logic for page navigation
+# Main app logic with better error handling
 def main():
-    sidebar_content()
-    if st.session_state.page == 1:
-        page_1()
-    elif st.session_state.page == 2:
-        page_2()
+    try:
+        sidebar_content()
+        if st.session_state.page == 1:
+            page_1()
+        elif st.session_state.page == 2:
+            page_2()
+    except Exception as e:
+        logger.error(f"Unexpected error in main app: {str(e)}")
+        st.error(f"An unexpected error occurred: {str(e)}")
+        # Add a way to recover
+        st.button("Reset Application", on_click=lambda: st.session_state.clear())
 
 if __name__ == "__main__":
     main()
